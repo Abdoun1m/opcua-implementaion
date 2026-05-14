@@ -77,6 +77,7 @@ class Settings:
     opcua_facade_host: str
     opcua_facade_port: int
     opcua_facade_mode: str
+    opcua_facade_allow_signing: bool
     opcua_facade_max_csr_bytes: int
     opcua_facade_session_request_limit: int
     opcua_facade_client_enrollment_limit: int
@@ -166,6 +167,7 @@ def load_settings() -> Settings:
         opcua_facade_host=_env("GDS_OPCUA_FACADE_HOST", _env("GDS_OPCUA_PLACEHOLDER_HOST", "0.0.0.0")),
         opcua_facade_port=_env_int("GDS_OPCUA_FACADE_PORT", _env_int("GDS_OPCUA_PLACEHOLDER_PORT", 4841)),
         opcua_facade_mode=_env("GDS_OPCUA_FACADE_MODE", "cyber_range"),
+        opcua_facade_allow_signing=_env_bool("GDS_OPCUA_FACADE_ALLOW_SIGNING", False),
         opcua_facade_max_csr_bytes=_env_int("GDS_OPCUA_FACADE_MAX_CSR_BYTES", 8192),
         opcua_facade_session_request_limit=_env_int("GDS_OPCUA_FACADE_SESSION_REQUEST_LIMIT", 60),
         opcua_facade_client_enrollment_limit=_env_int("GDS_OPCUA_FACADE_CLIENT_ENROLLMENT_LIMIT", 10),

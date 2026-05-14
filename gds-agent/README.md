@@ -280,10 +280,16 @@ CLI:
 - `python -m app.main --create-package-activation-plan --package-id <package_id>`
 - `python -m app.main --stage-package-activation-dry-run --package-id <package_id> --target fuxa --plan-id <plan_id>`
 
-Collector events:
+Normalized package workflow events:
 
+- `package_pulled`
 - `certificate_package_verified`
+- `package_activation_plan_created`
+- `package_activation_dry_run_staged`
 - `certificate_package_rejected`
+- `package_activation_failed`
+
+Rejected or failed package events include a stable `failure_code` when the failure class is known.
 
 GDS lifecycle reports:
 
@@ -292,6 +298,17 @@ GDS lifecycle reports:
 - `STAGED` after local package cache and activation-plan preview are written.
 
 These reports are best-effort and non-blocking. `STAGED` remains dry-run/local-cache only in Phase 7.
+
+Public Phase 7 validation entrypoint:
+
+```bash
+export PHASE7_PACKAGE_ID=<package_id>
+export GDS_AGENT_CONTAINER=labshock_ot_gds_agent
+export GDS_AGENT_TRUST_ANCHOR_FINGERPRINT=<expected_gds_signing_key_sha256>
+gds-agent/scripts/validate_phase_7_package_dry_run.sh
+```
+
+The script pulls the package, verifies its manifest signature against the pinned trust anchor, creates a package activation plan, stages the dry-run bundle, and asserts `runtime_write_enabled=false`, `runtime_mutation_performed=false`, and no private key overwrite in generated package artifacts.
 
 Package activation-plan integration:
 

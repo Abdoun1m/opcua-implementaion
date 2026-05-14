@@ -270,9 +270,14 @@ Phase 7.C adds a minimal OPC UA-native boundary adapter on `opc.tcp://192.168.10
 
 - Namespace: `urn:labshock:gds:facade`.
 - Mode: `GDS_OPCUA_FACADE_MODE=cyber_range`.
+- Real signing through the OPC UA facade is disabled by default with `GDS_OPCUA_FACADE_ALLOW_SIGNING=false`.
 - This is not full OPC UA Part 12 production compliance.
 - Exposed methods are restricted to capability, inventory, certificate-group, dry-run CSR validation, and package-status reads.
 - Dry-run CSR validation records request/audit metadata only; it does not sign with Vault and does not create packages.
+- `GetServerCapabilities` reports `enabled_operations`, `disabled_operations`, `runtime_write_enabled=false`, `dry_run_only=true`, and `part12_full_compliance=false`.
+- `CreateSigningRequestDryRun` remains available in the default mode and never signs or packages.
+- `CreateSigningRequest` returns structured `error_code=opcua_signing_disabled` unless `GDS_OPCUA_FACADE_ALLOW_SIGNING=true` is set for a controlled lab test.
+- REST HTTPS/mTLS endpoints remain the authoritative package issuance path.
 - No OPC UA method may mutate runtime trust stores, activation state, approvals, maintenance policy, revocation state, or live trust lists.
 - Responses never include private keys, Vault tokens, AppRole IDs, raw manifests, runtime paths, or policy blobs.
 
@@ -473,6 +478,13 @@ curl -sS --cacert ./gds/config/tls/ca.crt \
   -H "X-GDS-Agent-ID: ot-gds-agent" \
   -H "X-GDS-Agent-Token: $(sudo cat ./gds-agent/config/secrets/token)" \
   "https://192.168.10.30:8443/api/v1/packages/telemetry" | jq
+
+# Phase 7 OPC UA facade dry-run contract validation.
+# Pass --csr-pem-file for the optional valid CSR dry-run check.
+python gds/scripts/validate_phase_7_facade_contract.py \
+  --endpoint opc.tcp://192.168.10.30:4841/LabShock/GDS/Facade \
+  --application-uri urn:dataprotect:opcua:fuxa-client \
+  --profile-name node-opcua-client
 ```
 # GDS CRL and trust distribution notes
 

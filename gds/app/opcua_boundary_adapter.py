@@ -35,6 +35,16 @@ except Exception:  # pragma: no cover - runtime dependency is installed in the G
 LOG = logging.getLogger("gds.opcua.boundary")
 NAMESPACE_URI = "urn:labshock:gds:facade"
 ENDPOINT_PATH = "/LabShock/GDS/Facade"
+READ_DRY_RUN_OPERATIONS = [
+    "GetServerCapabilities",
+    "GetDiscovery",
+    "GetApplicationInventory",
+    "GetCertificateGroups",
+    "GetTrustMaterialStatus",
+    "CreateSigningRequestDryRun",
+    "GetPackageStatus",
+]
+SIGNING_OPERATION = "CreateSigningRequest"
 
 
 @dataclass
@@ -122,24 +132,25 @@ class OpcUaPart12BoundaryAdapter:
         if not self._allow_request(context):
             return self._error("rate_limit_exceeded", "OPC UA facade session request limit exceeded", context)
         profiles = list_component_profiles(self.settings)
+        enabled_operations = list(READ_DRY_RUN_OPERATIONS)
+        disabled_operations: list[str] = []
+        if self.settings.opcua_facade_allow_signing:
+            enabled_operations.append(SIGNING_OPERATION)
+        else:
+            disabled_operations.append(SIGNING_OPERATION)
         response = {
             "schema": "labshock_opcua_gds_facade_capabilities_v1",
             "namespace": NAMESPACE_URI,
             "mode": self.settings.opcua_facade_mode,
+            "endpoint_path": ENDPOINT_PATH,
             "part12_full_compliance": False,
             "runtime_write_enabled": False,
             "dry_run_only": True,
+            "opcua_signing_enabled": self.settings.opcua_facade_allow_signing,
             "security_model": "cyber_range_minimal_restricted_namespace",
-            "supported_operations": [
-                "GetServerCapabilities",
-                "GetDiscovery",
-                "GetApplicationInventory",
-                "GetCertificateGroups",
-                "GetTrustMaterialStatus",
-                "CreateSigningRequestDryRun",
-                "CreateSigningRequest",
-                "GetPackageStatus",
-            ],
+            "enabled_operations": enabled_operations,
+            "disabled_operations": disabled_operations,
+            "supported_operations": enabled_operations,
             "supported_profiles": [p.get("profile_name") for p in profiles],
             "limits": {
                 "max_csr_bytes": self.settings.opcua_facade_max_csr_bytes,
@@ -157,21 +168,19 @@ class OpcUaPart12BoundaryAdapter:
         if not self._allow_request(context):
             return self._error("rate_limit_exceeded", "OPC UA facade session request limit exceeded", context)
         profiles = list_component_profiles(self.settings)
+        enabled_operations = list(READ_DRY_RUN_OPERATIONS)
+        if self.settings.opcua_facade_allow_signing:
+            enabled_operations.append(SIGNING_OPERATION)
         response = {
             "schema": "labshock_opcua_gds_discovery_v1",
             "namespace": NAMESPACE_URI,
             "mode": self.settings.opcua_facade_mode,
             "private_key_export_allowed": False,
             "runtime_write_enabled": False,
-            "supported_operations": [
-                "GetDiscovery",
-                "GetApplicationInventory",
-                "GetCertificateGroups",
-                "GetTrustMaterialStatus",
-                "CreateSigningRequestDryRun",
-                "CreateSigningRequest",
-                "GetPackageStatus",
-            ],
+            "dry_run_only": True,
+            "enabled_operations": enabled_operations,
+            "disabled_operations": [] if self.settings.opcua_facade_allow_signing else [SIGNING_OPERATION],
+            "supported_operations": enabled_operations,
             "supported_profiles": [p.get("profile_name") for p in profiles],
             **context,
         }
@@ -300,6 +309,14 @@ class OpcUaPart12BoundaryAdapter:
             return self._error("rate_limit_exceeded", "OPC UA facade session request limit exceeded", context)
         if not self._allow_enrollment(context):
             return self._error("enrollment_rate_limit_exceeded", "OPC UA facade client enrollment limit exceeded", context)
+        if not self.settings.opcua_facade_allow_signing:
+            self._audit("opcua_signing_request_rejected", actor, context, {"error_code": "opcua_signing_disabled"})
+            return self._error(
+                "opcua_signing_disabled",
+                "OPC UA facade signing is disabled; use REST HTTPS/mTLS issuance or CreateSigningRequestDryRun",
+                context,
+                {"vault_signing_performed": False, "package_created": False, "dry_run_only": True},
+            )
         csr_pem = str(payload.get("csr_pem") or "")
         if len(csr_pem.encode("utf-8")) > self.settings.opcua_facade_max_csr_bytes:
             self._audit("opcua_signing_request_rejected", actor, context, {"error_code": "csr_too_large"})
