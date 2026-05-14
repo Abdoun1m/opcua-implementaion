@@ -1,0 +1,46 @@
+{
+  "timezone": "UTC",
+  "blackouts": [
+    {
+      "name": "change_freeze_q4",
+      "start_at": "2026-12-20T00:00:00Z",
+      "end_at": "2026-12-31T23:59:59Z"
+    }
+  ],
+  "targets": [
+    {
+      "target": "opcua-server",
+      "windows": [
+        {
+          "days": ["sat", "sun"],
+          "start": "01:00",
+          "end": "03:00"
+        }
+      ],
+      "blackouts": [],
+      "policy": {
+        "approval_level": "dual",
+        "maintenance_window_required": true,
+        "emergency_override_allowed": false,
+        "auto_rollback_enabled": true
+      }
+    },
+    {
+      "target": "fuxa",
+      "windows": [
+        {
+          "days": ["sat", "sun"],
+          "start": "01:00",
+          "end": "03:00"
+        }
+      ],
+      "blackouts": [],
+      "policy": {
+        "approval_level": "single",
+        "maintenance_window_required": true,
+        "emergency_override_allowed": true,
+        "auto_rollback_enabled": true
+      }
+    }
+  ]
+}

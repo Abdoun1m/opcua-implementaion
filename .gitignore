@@ -1,3 +1,12 @@
+# GitHub publish scope: only GDS control plane and GDS Agent are public.
+/*
+!/.gitattributes
+!/.gitignore
+!/gds/
+!/gds/**
+!/gds-agent/
+!/gds-agent/**
+
 # Prerequisites
 *.d
 
@@ -50,3 +59,43 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Python/runtime generated files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Lab secrets (keep examples only)
+gds/config/secrets/gds-agent-tokens.json
+gds-agent/config/secrets/token
+gds-agent/config/maintenance-windows.json
+opcua-server/config/secrets/token
+opcua-server/config/gds-tls/*
+!opcua-server/config/gds-tls/.gitkeep
+fuxa-gds-helper/config/token
+fuxa-gds-helper/config/tls/*
+!fuxa-gds-helper/config/tls/.gitkeep
+fuxa-gds-helper/cache/*
+!fuxa-gds-helper/cache/.gitkeep
+
+# Vault TLS/mTLS runtime material
+vault/approle/role_id
+vault/approle/secret_id
+vault/approle/gds_role_id
+vault/approle/gds_secret_id
+vault/config/tls/*.key
+vault/config/tls/*.crt
+vault/config/tls/*.pem
+gds/config/vault-tls/*.key
+gds/config/vault-tls/*.crt
+gds/config/vault-tls/*.pem
+vault/agent/tls/*.key
+vault/agent/tls/*.crt
+vault/agent/tls/*.pem
+vault-unseal/config/tls/*.key
+vault-unseal/config/tls/*.crt
+vault-unseal/config/tls/*.pem
+vault-unseal/secrets/

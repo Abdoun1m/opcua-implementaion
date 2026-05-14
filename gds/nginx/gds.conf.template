@@ -1,0 +1,87 @@
+worker_processes auto;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log /dev/stdout;
+    error_log /dev/stderr info;
+
+    client_body_temp_path /tmp/nginx/client_body;
+    proxy_temp_path /tmp/nginx/proxy;
+    fastcgi_temp_path /tmp/nginx/fastcgi;
+    uwsgi_temp_path /tmp/nginx/uwsgi;
+    scgi_temp_path /tmp/nginx/scgi;
+
+    client_max_body_size 10m;
+    proxy_http_version 1.1;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
+
+    upstream gds_uvicorn {
+        server 127.0.0.1:__GDS_UVICORN_INTERNAL_PORT__;
+    }
+
+    server {
+        listen 8081;
+        server_name _;
+
+        location = /internal/health {
+            return 404;
+        }
+
+        location / {
+            proxy_pass http://gds_uvicorn;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto http;
+            proxy_set_header X-GDS-Internal-Proxy "__GDS_INTERNAL_PROXY_SECRET__";
+            proxy_set_header X-Client-Cert-Verify "";
+            proxy_set_header X-Client-Cert-Subject "";
+            proxy_set_header X-Client-Cert-Issuer "";
+            proxy_set_header X-Client-Cert-Serial "";
+            proxy_set_header X-Client-Cert-Fingerprint "";
+            proxy_set_header X-Client-Cert-Not-Before "";
+            proxy_set_header X-Client-Cert-Not-After "";
+            proxy_set_header X-Client-Cert-Days-Remaining "";
+        }
+    }
+
+    server {
+        listen 8443 ssl;
+        server_name _;
+
+        ssl_certificate __GDS_TLS_SERVER_CERT_FILE__;
+        ssl_certificate_key __GDS_TLS_SERVER_KEY_FILE__;
+        ssl_client_certificate __GDS_TLS_CLIENT_CA_FILE__;
+        ssl_verify_client __GDS_NGINX_SSL_VERIFY_CLIENT__;
+        ssl_verify_depth 2;
+        ssl_protocols __GDS_NGINX_SSL_PROTOCOLS__;
+        ssl_prefer_server_ciphers off;
+        __GDS_NGINX_SSL_CRL_DIRECTIVE__
+
+        location = /internal/health {
+            return 404;
+        }
+
+        location / {
+            proxy_pass http://gds_uvicorn;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-GDS-Internal-Proxy "__GDS_INTERNAL_PROXY_SECRET__";
+            proxy_set_header X-Client-Cert-Verify $ssl_client_verify;
+            proxy_set_header X-Client-Cert-Subject $ssl_client_s_dn;
+            proxy_set_header X-Client-Cert-Issuer $ssl_client_i_dn;
+            proxy_set_header X-Client-Cert-Serial $ssl_client_serial;
+            proxy_set_header X-Client-Cert-Fingerprint $ssl_client_fingerprint;
+            proxy_set_header X-Client-Cert-Not-Before $ssl_client_v_start;
+            proxy_set_header X-Client-Cert-Not-After $ssl_client_v_end;
+            proxy_set_header X-Client-Cert-Days-Remaining $ssl_client_v_remain;
+        }
+    }
+}
