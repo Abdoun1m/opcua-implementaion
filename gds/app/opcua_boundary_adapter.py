@@ -279,7 +279,12 @@ class OpcUaPart12BoundaryAdapter:
             )
         except LifecycleError as exc:
             self._audit("opcua_signing_request_dry_run_rejected", actor, context, {"error_code": exc.code, "details": exc.details})
-            return self._error(exc.code, str(exc), context, exc.details)
+            return self._error(
+                exc.code,
+                str(exc),
+                context,
+                {**exc.details, "vault_signing_performed": False, "package_created": False},
+            )
         request = result["request"]
         validation = result["validation_result"]
         response = {

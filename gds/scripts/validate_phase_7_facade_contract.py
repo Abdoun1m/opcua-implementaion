@@ -134,7 +134,19 @@ async def _main() -> int:
                     "client_id": "phase7-validation",
                 },
             )
-            if invalid_dry_run.get("vault_signing_performed") is False and invalid_dry_run.get("package_created") is False:
+            invalid_details = invalid_dry_run.get("details") if isinstance(invalid_dry_run.get("details"), dict) else {}
+            if (
+                invalid_dry_run.get("dry_run_only") is True
+                and invalid_dry_run.get("runtime_write_enabled") is False
+                and (
+                    invalid_dry_run.get("vault_signing_performed") is False
+                    or invalid_details.get("vault_signing_performed") is False
+                )
+                and (
+                    invalid_dry_run.get("package_created") is False
+                    or invalid_details.get("package_created") is False
+                )
+            ):
                 _pass("dry_run_rejects_invalid_csr_without_signing")
             else:
                 failures += 1

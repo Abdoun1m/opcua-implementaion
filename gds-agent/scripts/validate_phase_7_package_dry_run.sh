@@ -20,6 +20,8 @@ TARGET="${PHASE7_TARGET:-${GDS_AGENT_TARGET:-${TARGET:-}}}"
 
 if [ -z "$PACKAGE_ID" ]; then
   fail "missing_package_id_set_PHASE7_PACKAGE_ID"
+  printf '[INFO] Issue or select a package first, then run with PHASE7_PACKAGE_ID=<package_id>.\n'
+  printf '[INFO] Example: PHASE7_PACKAGE_ID="$PKG" GDS_AGENT_TRUST_ANCHOR_FINGERPRINT="$ANCHOR" %s\n' "$0"
   printf '[SUMMARY] pass=%s fail=%s\n' "$PASS_COUNT" "$FAIL_COUNT"
   exit 1
 fi
