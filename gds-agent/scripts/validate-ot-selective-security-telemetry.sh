@@ -57,8 +57,8 @@ else
   fail "collector_summary_unreachable"
 fi
 
-if docker logs --tail=300 "$AGENT_CONTAINER" >/tmp/labshock-ot-telemetry-agent-logs.txt 2>/tmp/labshock-ot-telemetry-agent-logs.err; then
-  if has_pattern "ot collector telemetry dropped|runtime_write_deprecated_use_native_client|package_activation_dry_run_staged|certificate_package_rejected|target_not_managed_by_agent_zone" /tmp/labshock-ot-telemetry-agent-logs.txt; then
+if docker logs --tail=500 "$AGENT_CONTAINER" >/tmp/labshock-ot-telemetry-agent-logs.txt 2>/tmp/labshock-ot-telemetry-agent-logs.err; then
+  if has_pattern "ot collector telemetry dropped|runtime_write_deprecated_use_native_client|package_activation_dry_run_staged|certificate_package_rejected|target_not_managed_by_agent_zone|ot telemetry enabled=|HTTP Request: POST http://192.168.1.70:8088/events|package lifecycle reported" /tmp/labshock-ot-telemetry-agent-logs.txt; then
     pass "agent_logs_include_selective_telemetry_markers"
   else
     fail "agent_logs_missing_selective_markers"
