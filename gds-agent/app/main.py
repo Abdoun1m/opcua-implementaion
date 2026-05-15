@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import shutil
 import tempfile
 import time
@@ -28,6 +29,40 @@ from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey, Ed25519PrivateKey
 from cryptography.exceptions import InvalidSignature
+
+TELEMETRY_LAST_SENT: dict[str, float] = {}
+TELEMETRY_LAST_HEALTH: dict[str, float] = {}
+
+ALWAYS_FORWARD_EVENT_HINTS = {
+    "agent_start",
+    "agent_stop",
+    "runtime_write_deprecated_use_native_client",
+    "target_not_managed_by_agent_zone",
+    "trust_anchor_mismatch",
+    "certificate_package_rejected",
+    "package_activation_failed",
+    "renew_runtime_certificate_failed",
+    "signed_artifact_validation_failed",
+    "approval_denied",
+    "approval_expired",
+    "blackout_active",
+    "maintenance_window_closed",
+    "vault_sealed",
+    "crl_stale",
+    "policy_violation",
+}
+
+SECURITY_CATEGORIES = {
+    "security",
+    "policy_audit",
+    "access_control",
+    "error",
+    "sensitive_operator_action",
+    "pki_lifecycle",
+    "certificate_lifecycle",
+}
+
+HEALTH_CATEGORIES = {"system_health", "lifecycle", "pki_trust_sync"}
 
 
 class JsonFormatter(logging.Formatter):
@@ -4957,6 +4992,102 @@ def normalize_for_ot_collector(
     return payload
 
 
+def _telemetry_policy_enabled() -> bool:
+    # Shared OT-side toggle with component override for the GDS agent.
+    return env_bool("GDS_AGENT_OT_TELEMETRY_ENABLED", env_bool("LABSHOCK_OT_TELEMETRY_ENABLED", True))
+
+
+def _telemetry_policy_mode() -> str:
+    mode = env("GDS_AGENT_OT_TELEMETRY_MODE", env("LABSHOCK_OT_TELEMETRY_MODE", "security_only")).strip().lower()
+    if mode not in {"debug_all", "security_only", "sampled_operations", "off"}:
+        return "security_only"
+    return mode
+
+
+def _telemetry_dedup_window_seconds() -> int:
+    return max(0, env_int("GDS_AGENT_OT_COLLECTOR_DEDUP_WINDOW_SECONDS", env_int("LABSHOCK_OT_COLLECTOR_DEDUP_WINDOW_SECONDS", 60)))
+
+
+def _telemetry_health_summary_seconds() -> int:
+    return max(1, env_int("GDS_AGENT_OT_COLLECTOR_HEALTH_SUMMARY_SECONDS", env_int("LABSHOCK_OT_HEALTH_SUMMARY_SECONDS", 300)))
+
+
+def _telemetry_sample_rate() -> float:
+    raw = env("GDS_AGENT_OT_COLLECTOR_SAMPLE_RATE", env("LABSHOCK_OT_COLLECTOR_SAMPLE_RATE", "0.05"))
+    try:
+        val = float(raw)
+    except ValueError:
+        return 0.05
+    return max(0.0, min(1.0, val))
+
+
+def _event_key(event_category: str, message: str, severity: str, tags: dict[str, Any], raw: dict[str, Any]) -> str:
+    target = str(tags.get("target", "")) if isinstance(tags, dict) else ""
+    code = str(raw.get("error_code", "")) if isinstance(raw, dict) else ""
+    return f"{event_category}|{severity}|{message}|{target}|{code}"
+
+
+def _is_security_event(event_category: str, severity: str, message: str, raw: dict[str, Any], tags: dict[str, Any]) -> bool:
+    if event_category in SECURITY_CATEGORIES:
+        return True
+    if severity in {"warning", "error", "critical"}:
+        return True
+    text = f"{message} {raw.get('event_type', '')} {raw.get('error_code', '')}".lower() if isinstance(raw, dict) else message.lower()
+    if any(hint in text for hint in ALWAYS_FORWARD_EVENT_HINTS):
+        return True
+    if isinstance(tags, dict) and str(tags.get("sensitive_action", "")).lower() == "true":
+        return True
+    return False
+
+
+def _telemetry_decision(
+    *,
+    event_category: str,
+    severity: str,
+    message: str,
+    raw: dict[str, Any],
+    tags: dict[str, Any],
+) -> tuple[bool, str]:
+    if not _telemetry_policy_enabled():
+        return False, "telemetry_disabled"
+    mode = _telemetry_policy_mode()
+    if mode == "off":
+        return False, "mode_off"
+    now = time.time()
+    key = _event_key(event_category, message, severity, tags, raw)
+    dedup_window = _telemetry_dedup_window_seconds()
+    if dedup_window > 0:
+        last = TELEMETRY_LAST_SENT.get(key)
+        if last is not None and (now - last) < dedup_window:
+            return False, "dedup_suppressed"
+
+    if mode == "debug_all":
+        TELEMETRY_LAST_SENT[key] = now
+        return True, "mode_debug_all"
+
+    if _is_security_event(event_category, severity, message, raw, tags):
+        TELEMETRY_LAST_SENT[key] = now
+        return True, "security_event"
+
+    if event_category in HEALTH_CATEGORIES:
+        health_key = f"{event_category}|{severity}|{message}"
+        min_interval = _telemetry_health_summary_seconds()
+        last_health = TELEMETRY_LAST_HEALTH.get(health_key)
+        if last_health is not None and (now - last_health) < min_interval:
+            return False, "health_rate_limited"
+        TELEMETRY_LAST_HEALTH[health_key] = now
+        TELEMETRY_LAST_SENT[key] = now
+        return True, "health_summary"
+
+    if mode == "sampled_operations":
+        if random.random() <= _telemetry_sample_rate():
+            TELEMETRY_LAST_SENT[key] = now
+            return True, "sampled"
+        return False, "sampled_drop"
+
+    return False, "security_only_drop"
+
+
 def forward_ot_collector_event(
     log: logging.Logger,
     enabled: bool,
@@ -4976,9 +5107,29 @@ def forward_ot_collector_event(
 ) -> None:
     if not enabled:
         return
+    allow, reason = _telemetry_decision(
+        event_category=event_category,
+        severity=severity,
+        message=message,
+        raw=raw if isinstance(raw, dict) else {},
+        tags=tags if isinstance(tags, dict) else {},
+    )
+    if not allow:
+        log.debug(
+            "ot collector telemetry dropped category=%s severity=%s reason=%s message=%s",
+            event_category,
+            severity,
+            reason,
+            message,
+        )
+        return
 
     tag_payload = {
         "component": "labshock_ot_gds_agent",
+        "source_type": "gds_agent",
+        "zone": agent_zone,
+        "collector_decision": "forward",
+        "reason": reason,
         "gds_control_plane": control_plane_host,
         "trustlist_zone": tags.get("trustlist_zone", ""),
         "trustlist_role": tags.get("trustlist_role", ""),
@@ -4995,7 +5146,7 @@ def forward_ot_collector_event(
             "id": uuid4().hex,
             "timestamp": format_rfc3339_utc(),
             "zone": agent_zone,
-            "source_type": "gds-agent",
+            "source_type": "gds_agent",
             "asset_name": "OT GDS Agent",
             "asset_ip": asset_ip,
             "severity": severity,
@@ -6940,6 +7091,14 @@ def main() -> int:
     log.info("agent auth enabled=%s", agent_auth_enabled)
     log.info("signed artifact mode require_signed=%s pinned_anchor_set=%s", require_signed_artifacts, bool(pinned_anchor_fingerprint))
     log.info("sign_debug enabled=%s", sign_debug)
+    log.info(
+        "ot telemetry enabled=%s mode=%s dedup_window_seconds=%s health_summary_seconds=%s sample_rate=%s",
+        _telemetry_policy_enabled(),
+        _telemetry_policy_mode(),
+        _telemetry_dedup_window_seconds(),
+        _telemetry_health_summary_seconds(),
+        _telemetry_sample_rate(),
+    )
     log.info(
         "runtime preview enabled=%s approval_required=%s emergency_override_mode=%s merge_policy=%s",
         runtime_preview_enabled,

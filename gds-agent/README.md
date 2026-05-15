@@ -174,12 +174,26 @@ Environment:
 - `GDS_AGENT_OT_COLLECTOR_URL=http://192.168.1.70:8088/events`
 - `GDS_AGENT_FORWARD_TIMEOUT_SECONDS=3`
 - `GDS_AGENT_SYNC_SUCCESS_EVENT_MIN_INTERVAL_SECONDS=300`
+- `LABSHOCK_OT_TELEMETRY_ENABLED=true`
+- `LABSHOCK_OT_TELEMETRY_MODE=security_only`
+- `GDS_AGENT_OT_TELEMETRY_ENABLED=true`
+- `GDS_AGENT_OT_TELEMETRY_MODE=security_only`
+- `GDS_AGENT_OT_COLLECTOR_DEDUP_WINDOW_SECONDS=60`
+- `GDS_AGENT_OT_COLLECTOR_HEALTH_SUMMARY_SECONDS=300`
+- `GDS_AGENT_OT_COLLECTOR_SAMPLE_RATE=0.05` (used when mode is `sampled_operations`)
 
 Forwarding behavior:
 
 - Best effort only, never blocks sync cycle.
 - No retry yet.
 - Logs forwarding failures and continues local cache/diff flow.
+- Selective forwarding policy modes:
+  - `debug_all`: forward all normalized events.
+  - `security_only`: forward only security/policy/error/high-severity events plus rate-limited health summaries.
+  - `sampled_operations`: same security behavior plus sampled low-value operational events.
+  - `off`: local logs only.
+- Duplicate suppression is applied before forwarding using `GDS_AGENT_OT_COLLECTOR_DEDUP_WINDOW_SECONDS`.
+- Health/lifecycle info forwarding is rate-limited by `GDS_AGENT_OT_COLLECTOR_HEALTH_SUMMARY_SECONDS`.
 - `raw` is always sent as a JSON string (collector compatibility mode), never as nested object.
 - Never forwards private keys, Vault tokens, role IDs, secret IDs, full PEM, or full CRL payload.
 - Sensitive fields in forwarded `raw` payloads are redacted defensively (`pem`, `ca_chain_pem`, `crl_base64`, `token`, `role_id`, `secret_id`, `private_key`).
@@ -187,6 +201,10 @@ Forwarding behavior:
   - `GDS_AGENT_OT_COLLECTOR_MAX_MESSAGE_LEN` (default `512`)
   - `GDS_AGENT_OT_COLLECTOR_MAX_RAW_LEN` (default `4096`)
   - `GDS_AGENT_OT_COLLECTOR_MAX_PAYLOAD_BYTES` (default `16384`)
+
+Validation helper:
+
+- `gds-agent/scripts/validate-ot-selective-security-telemetry.sh`
 
 ## Pulled Endpoints
 
