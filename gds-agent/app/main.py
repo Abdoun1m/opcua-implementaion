@@ -6966,7 +6966,6 @@ def main() -> int:
         deprecated_commands = {
             "--runtime-preview-once": args.runtime_preview_once,
             "--stage-activation-dry-run": args.stage_activation_dry_run,
-            "--stage-package-activation-dry-run": args.stage_package_activation_dry_run,
             "--activate-package": args.activate_package,
             "--validate-package-activation": args.validate_package_activation,
             "--validate-fuxa-activation": args.validate_fuxa_activation,
