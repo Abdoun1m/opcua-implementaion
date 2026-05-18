@@ -65,6 +65,7 @@ from .db import (
     update_certificate_package_lifecycle,
     upsert_application,
 )
+from .dmz_collector_sender import DmzCollectorSender, start_dmz_collector_sender
 from .inventory import seed_and_import
 from .lifecycle import LifecycleError, issue_certificate_package, package_signature_payload
 from .logging_json import configure_logging
@@ -84,6 +85,7 @@ ARTIFACT_REGEN_LOCK = threading.Lock()
 ARTIFACT_REGEN_LAST_AT: dict[str, float] = {}
 ARTIFACT_SCAN_STOP = threading.Event()
 ARTIFACT_SCAN_THREAD: threading.Thread | None = None
+DMZ_COLLECTOR_SENDER: DmzCollectorSender | None = None
 AGENT_AUTH_STORE: AgentAuthStore | None = None
 LAST_GOOD_INTERMEDIATE_CRL: dict | None = None
 
@@ -181,7 +183,7 @@ class ComponentEventBody(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global OPCUA_BOUNDARY_ADAPTER, VAULT_CLIENT, TRUST_ARTIFACT_SIGNER, ARTIFACT_SCAN_THREAD, AGENT_AUTH_STORE
+    global OPCUA_BOUNDARY_ADAPTER, VAULT_CLIENT, TRUST_ARTIFACT_SIGNER, ARTIFACT_SCAN_THREAD, DMZ_COLLECTOR_SENDER, AGENT_AUTH_STORE
     os.makedirs(SETTINGS.data_dir, exist_ok=True)
     LOG.info("gds bootstrap starting version=%s", SETTINGS.service_version)
     VAULT_CLIENT = VaultClient(SETTINGS)
@@ -205,6 +207,7 @@ async def lifespan(_: FastAPI):
     ARTIFACT_SCAN_STOP.clear()
     ARTIFACT_SCAN_THREAD = threading.Thread(target=_artifact_scan_loop, name="gds-artifact-scan", daemon=True)
     ARTIFACT_SCAN_THREAD.start()
+    DMZ_COLLECTOR_SENDER = start_dmz_collector_sender(SETTINGS)
 
     if SETTINGS.opcua_facade_enabled:
         OPCUA_BOUNDARY_ADAPTER = OpcUaPart12BoundaryAdapter(SETTINGS)
@@ -216,6 +219,8 @@ async def lifespan(_: FastAPI):
         ARTIFACT_SCAN_STOP.set()
         if ARTIFACT_SCAN_THREAD:
             ARTIFACT_SCAN_THREAD.join(timeout=3.0)
+        if DMZ_COLLECTOR_SENDER:
+            DMZ_COLLECTOR_SENDER.stop(timeout=3.0)
         if OPCUA_BOUNDARY_ADAPTER:
             await OPCUA_BOUNDARY_ADAPTER.stop()
         LOG.info("gds bootstrap stopped")
@@ -754,6 +759,7 @@ def _expiry_state(days_remaining: int | None) -> str:
 
 def _certificate_telemetry_record(cert: dict) -> dict:
     days_remaining = _days_until(cert.get("not_after"))
+    operational = str(cert.get("status", "")).lower() == "active" and not cert.get("revoked_at")
     return {
         "id": cert.get("id"),
         "application_id": cert.get("application_id"),
@@ -769,9 +775,49 @@ def _certificate_telemetry_record(cert: dict) -> dict:
         "not_after": _as_iso(cert.get("not_after")),
         "days_remaining": days_remaining,
         "expiry_state": _expiry_state(days_remaining),
+        "operational": operational,
         "status": cert.get("status"),
         "revoked_at": _as_iso(cert.get("revoked_at")),
     }
+
+
+def _count_by_expiry_state(certs: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for cert in certs:
+        state = str(cert.get("expiry_state") or "unknown")
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def _renewal_threshold_days_for_profile(profile_meta: dict | None) -> int:
+    profile_meta = profile_meta or {}
+    policy = profile_meta.get("enrollment_policy_json")
+    if not isinstance(policy, dict):
+        policy = profile_meta.get("enrollment_policy")
+    if isinstance(policy, dict) and policy.get("renewal_threshold_days") is not None:
+        try:
+            threshold = int(policy["renewal_threshold_days"])
+            if threshold >= 0:
+                return threshold
+        except (TypeError, ValueError):
+            LOG.warning(
+                "invalid profile renewal_threshold_days profile=%s value=%r",
+                profile_meta.get("profile_name"),
+                policy.get("renewal_threshold_days"),
+            )
+    try:
+        threshold = int(SETTINGS.renewal_threshold_days)
+        if threshold >= 0:
+            return threshold
+    except (TypeError, ValueError):
+        LOG.warning("invalid setting renewal_threshold_days value=%r", SETTINGS.renewal_threshold_days)
+    return 14
+
+
+def _renewal_threshold_days_for_app(app: dict) -> int:
+    profile_meta = _profile_for_application(app)
+    profile_row = get_component_profile(SETTINGS, str(profile_meta.get("profile_name") or "")) or {}
+    return _renewal_threshold_days_for_profile({**profile_meta, **profile_row})
 
 
 def _certificate_drift_report() -> dict:
@@ -869,9 +915,9 @@ def get_certificate_telemetry(request: Request):
     if auth_err:
         return auth_err
     certs = [_certificate_telemetry_record(cert) for cert in list_certificates(SETTINGS)]
-    counts: dict[str, int] = {}
-    for cert in certs:
-        counts[cert["expiry_state"]] = counts.get(cert["expiry_state"], 0) + 1
+    operational_certs = [cert for cert in certs if cert.get("operational")]
+    counts = _count_by_expiry_state(operational_certs)
+    historical_counts = _count_by_expiry_state([cert for cert in certs if not cert.get("operational")])
     audit(
         SETTINGS,
         "certificate_telemetry_read",
@@ -886,6 +932,9 @@ def get_certificate_telemetry(request: Request):
             "critical_days": SETTINGS.cert_expiry_critical_days,
         },
         "counts_by_expiry_state": counts,
+        "historical_counts_by_expiry_state": historical_counts,
+        "operational_certificate_count": len(operational_certs),
+        "historical_certificate_count": len(certs) - len(operational_certs),
         "certificates": certs,
     }
 
@@ -1374,7 +1423,8 @@ def _component_lifecycle_payload(app: dict) -> dict | JSONResponse:
         days_until_expiry = None
         if isinstance(not_after, datetime):
             days_until_expiry = int((not_after - datetime.now(timezone.utc)).total_seconds() // 86400)
-        renewal_required = bool(days_until_expiry is not None and days_until_expiry <= SETTINGS.cert_expiry_warning_days)
+        renewal_threshold_days = _renewal_threshold_days_for_app(app)
+        renewal_required = bool(days_until_expiry is not None and days_until_expiry <= renewal_threshold_days)
         return _json_safe({
             "schema": "labshock_gds_component_lifecycle_v1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1385,7 +1435,7 @@ def _component_lifecycle_payload(app: dict) -> dict | JSONResponse:
             "certificate_not_after": _as_iso(not_after),
             "days_until_expiry": days_until_expiry,
             "renewal_required": renewal_required,
-            "renewal_threshold_days": SETTINGS.cert_expiry_warning_days,
+            "renewal_threshold_days": renewal_threshold_days,
             "trust_artifact_version": trust_version.get("trust_artifact_version"),
             "trust_artifact_revision": trust_version.get("trust_artifact_revision"),
             "trust_artifact_sha256": current_hash,
@@ -1602,6 +1652,8 @@ def get_component_renewal_policy(application_uri: str, request: Request):
     if auth_err:
         return auth_err
     profile_meta = _profile_for_application(app_row)
+    profile_row = get_component_profile(SETTINGS, str(profile_meta.get("profile_name") or "")) or {}
+    renewal_threshold_days = _renewal_threshold_days_for_profile({**profile_meta, **profile_row})
     active_cert = resolve_component_active_certificate(app_row)
     return {
         "schema": "labshock_gds_component_renewal_policy_v1",
@@ -1612,7 +1664,7 @@ def get_component_renewal_policy(application_uri: str, request: Request):
         "enrollment_allowed": True,
         "renewal_allowed": bool(active_cert),
         "default_ttl": SETTINGS.cert_default_ttl,
-        "renewal_threshold_days": SETTINGS.cert_expiry_warning_days,
+        "renewal_threshold_days": renewal_threshold_days,
         "active_certificate": _safe_certificate(active_cert),
         "private_key_included": False,
     }

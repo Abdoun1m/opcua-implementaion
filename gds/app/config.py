@@ -97,9 +97,21 @@ class Settings:
     internal_proxy_secret_file: str
     cert_expiry_warning_days: int
     cert_expiry_critical_days: int
+    renewal_threshold_days: int
     tls_client_crl_file: str
     vault_sign_role: str
     cert_default_ttl: str
+    dmz_collector_enabled: bool
+    dmz_collector_url: str
+    dmz_collector_token_file: str
+    dmz_collector_poll_interval_seconds: int
+    dmz_collector_health_interval_seconds: int
+    dmz_collector_db_summary_interval_seconds: int
+    dmz_collector_batch_size: int
+    dmz_collector_timeout_seconds: int
+    dmz_collector_max_message_len: int
+    dmz_collector_max_raw_len: int
+    dmz_collector_max_payload_bytes: int
 
     @property
     def pg_dsn(self) -> str:
@@ -187,7 +199,19 @@ def load_settings() -> Settings:
         internal_proxy_secret_file=internal_proxy_secret_file,
         cert_expiry_warning_days=_env_int("GDS_CERT_EXPIRY_WARNING_DAYS", 30),
         cert_expiry_critical_days=_env_int("GDS_CERT_EXPIRY_CRITICAL_DAYS", 7),
+        renewal_threshold_days=_env_int("GDS_RENEWAL_THRESHOLD_DAYS", 7),
         tls_client_crl_file=_env("GDS_TLS_CLIENT_CRL_FILE", "/etc/labshock-gds-tls/client-ca.crl.pem"),
         vault_sign_role=_env("GDS_VAULT_SIGN_ROLE", "opcua-application"),
         cert_default_ttl=_env("GDS_CERT_DEFAULT_TTL", "720h"),
+        dmz_collector_enabled=_env_bool("GDS_DMZ_COLLECTOR_ENABLED", False),
+        dmz_collector_url=_env("GDS_DMZ_COLLECTOR_URL", "http://192.168.10.70:9000/gds/events"),
+        dmz_collector_token_file=_env("GDS_DMZ_COLLECTOR_TOKEN_FILE", "/etc/labshock-gds-agent-auth/dmz-collector-token"),
+        dmz_collector_poll_interval_seconds=_env_int("GDS_DMZ_COLLECTOR_POLL_INTERVAL_SECONDS", 5),
+        dmz_collector_health_interval_seconds=_env_int("GDS_DMZ_COLLECTOR_HEALTH_INTERVAL_SECONDS", 300),
+        dmz_collector_db_summary_interval_seconds=_env_int("GDS_DMZ_COLLECTOR_DB_SUMMARY_INTERVAL_SECONDS", 300),
+        dmz_collector_batch_size=_env_int("GDS_DMZ_COLLECTOR_BATCH_SIZE", 100),
+        dmz_collector_timeout_seconds=_env_int("GDS_DMZ_COLLECTOR_TIMEOUT_SECONDS", 3),
+        dmz_collector_max_message_len=_env_int("GDS_DMZ_COLLECTOR_MAX_MESSAGE_LEN", 512),
+        dmz_collector_max_raw_len=_env_int("GDS_DMZ_COLLECTOR_MAX_RAW_LEN", 4096),
+        dmz_collector_max_payload_bytes=_env_int("GDS_DMZ_COLLECTOR_MAX_PAYLOAD_BYTES", 16384),
     )

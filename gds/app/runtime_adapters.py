@@ -265,6 +265,7 @@ def _profile(
             "manual_approval_required": False,
             "allowed_zones": ["OT", "DMZ"],
             "allow_private_ip_sans": True,
+            "renewal_threshold_days": 7,
         },
         "status": "active",
     }

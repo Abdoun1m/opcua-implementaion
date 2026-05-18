@@ -6,6 +6,22 @@
 !/gds/**
 !/gds-agent/
 !/gds-agent/**
+!/opcua-dmz-gateway/
+opcua-dmz-gateway/*
+!/opcua-dmz-gateway/CMakeLists.txt
+!/opcua-dmz-gateway/entrypoint.sh
+!/opcua-dmz-gateway/src/
+!/opcua-dmz-gateway/src/**
+opcua-dmz-gateway/src/*.bak_old
+!/opcua-dmz-gateway/config/
+opcua-dmz-gateway/config/*
+!/opcua-dmz-gateway/config/secrets/
+opcua-dmz-gateway/config/secrets/*
+!/opcua-dmz-gateway/config/secrets/*.example
+!/scripts/
+/scripts/*
+!/scripts/test_gds_dmz_collector_sender.sh
+!/scripts/test_opcua_dmz_collector_sender.sh
 
 # Prerequisites
 *.d
@@ -70,8 +86,10 @@ __pycache__/
 
 # Lab secrets (keep examples only)
 gds/config/secrets/gds-agent-tokens.json
+gds/config/secrets/dmz-collector-token
 gds-agent/config/secrets/token
 gds-agent/config/maintenance-windows.json
+opcua-dmz-gateway/config/secrets/dmz-collector-token
 opcua-server/config/secrets/token
 opcua-server/config/gds-tls/*
 !opcua-server/config/gds-tls/.gitkeep

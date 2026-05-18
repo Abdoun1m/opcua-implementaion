@@ -746,6 +746,22 @@ def list_audit_events(settings: Settings, limit: int = 200) -> list[dict[str, An
             return cur.fetchall()
 
 
+def list_audit_events_after_id(settings: Settings, after_id: int, limit: int = 200) -> list[dict[str, Any]]:
+    with get_conn(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM audit_events
+                WHERE id > %s
+                ORDER BY id ASC
+                LIMIT %s
+                """,
+                (after_id, limit),
+            )
+            return cur.fetchall()
+
+
 def list_audit_events_by_type(settings: Settings, event_types: list[str], limit: int = 1000) -> list[dict[str, Any]]:
     with get_conn(settings) as conn:
         with conn.cursor() as cur:
@@ -759,6 +775,55 @@ def list_audit_events_by_type(settings: Settings, event_types: list[str], limit:
                 (event_types, limit),
             )
             return cur.fetchall()
+
+
+def gds_db_telemetry_snapshot(settings: Settings) -> dict[str, Any]:
+    tables = {
+        "audit_events": "created_at",
+        "applications": "created_at",
+        "certificates": "created_at",
+        "certificate_requests": "created_at",
+        "certificate_packages": "created_at",
+        "package_events": "created_at",
+        "component_events": "created_at",
+        "trust_lists": "created_at",
+        "trust_artifacts": "created_at",
+    }
+    snapshot: dict[str, Any] = {
+        "ok": True,
+        "checked_at": utc_now().isoformat(),
+        "database": settings.pg_db,
+        "host": settings.pg_host,
+        "port": settings.pg_port,
+        "tables": {},
+    }
+    with get_conn(settings) as conn:
+        with conn.cursor() as cur:
+            for table_name, timestamp_column in tables.items():
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT
+                          COUNT(*) AS row_count,
+                          MAX(id) AS latest_id,
+                          MAX({timestamp_column}) AS latest_timestamp
+                        FROM {table_name}
+                        """
+                    )
+                    row = cur.fetchone() or {}
+                    snapshot["tables"][table_name] = {
+                        "ok": True,
+                        "row_count": int(row.get("row_count") or 0),
+                        "latest_id": row.get("latest_id"),
+                        "latest_timestamp": row.get("latest_timestamp"),
+                    }
+                except Exception as exc:
+                    snapshot["ok"] = False
+                    snapshot["tables"][table_name] = {
+                        "ok": False,
+                        "error_class": exc.__class__.__name__,
+                    }
+    return snapshot
 
 
 def count_audit_events_by_reason(settings: Settings, event_type: str) -> list[dict[str, Any]]:
@@ -1168,7 +1233,28 @@ def mark_certificate_revoked(settings: Settings, certificate_id: int) -> dict[st
         conn.commit()
         return row
 
-
+def mark_expired_active_certificates(settings: Settings) -> list[dict[str, Any]]:
+    """
+    Mark certificates as expired when they are still active but their not_after date is in the past.
+    This fixes GDS drift where expired certificates remain active in inventory.
+    """
+    with get_conn(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE certificates
+                SET status = 'expired'
+                WHERE status = 'active'
+                  AND revoked_at IS NULL
+                  AND not_after IS NOT NULL
+                  AND not_after < now()
+                RETURNING *
+                """
+            )
+            rows = cur.fetchall()
+        conn.commit()
+        return rows
+    
 def list_certificate_packages(
     settings: Settings,
     *,

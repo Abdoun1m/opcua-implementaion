@@ -5260,6 +5260,9 @@ def _telemetry_cert_events(certificate_telemetry: dict[str, Any]) -> list[dict[s
     for cert in certs:
         if not isinstance(cert, dict):
             continue
+        status = str(cert.get("status", "")).lower()
+        if cert.get("operational") is False or (status and status != "active") or cert.get("revoked_at"):
+            continue
         state = str(cert.get("expiry_state", "unknown"))
         if state not in {"warning", "critical", "expired"}:
             continue
