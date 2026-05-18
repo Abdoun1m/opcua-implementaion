@@ -1474,7 +1474,141 @@ def persist_and_forward_inventory_drift(
     return report
 
 
-def _write_target_stage_material(root: Path, target_cfg: dict[str, Any], artifact: dict[str, Any]) -> list[dict[str, Any]]:
+# ─── GDS CRL lifecycle helpers ───────────────────────────────────────────────
+# These stems are written exclusively by the GDS trust-apply path.  Both the
+# .crl (DER) and .crl.b64 (base64) variants are GDS-managed and MUST be
+# cleaned atomically before a new trust package is activated so that expired
+# alias files never co-exist with a freshly-written .crl file.
+_GDS_CONTROLLED_CRL_STEMS: frozenset[str] = frozenset({
+    "vault_intermediate",
+    "root_ca",
+    "current",
+})
+
+
+def _gds_crl_candidates_in_dir(crl_dir: Path) -> list[Path]:
+    """Return every GDS-controlled CRL file present in *crl_dir*."""
+    if not crl_dir.is_dir():
+        return []
+    result: list[Path] = []
+    for p in crl_dir.iterdir():
+        if not p.is_file():
+            continue
+        lname = p.name.lower()
+        for stem in _GDS_CONTROLLED_CRL_STEMS:
+            if lname == f"{stem}.crl" or lname == f"{stem}.crl.b64":
+                result.append(p)
+                break
+    return sorted(result)
+
+
+def _snapshot_crl_dirs(crl_dirs: list[Path]) -> dict[str, bytes]:
+    """Capture byte content of every CRL file in *crl_dirs* for rollback."""
+    snap: dict[str, bytes] = {}
+    for d in crl_dirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            lname = p.name.lower()
+            if p.is_file() and (lname.endswith(".crl") or lname.endswith(".crl.b64")):
+                try:
+                    snap[str(p)] = p.read_bytes()
+                except OSError:
+                    pass
+    return snap
+
+
+def _restore_crl_snapshot(snapshot: dict[str, bytes], log: logging.Logger) -> None:
+    """Restore CRL files from *snapshot* (rollback path)."""
+    for path_str, content in snapshot.items():
+        p = Path(path_str)
+        try:
+            atomic_write_bytes(p, content)
+            log.warning("pki_crl_rollback_restored path=%s size=%d", path_str, len(content))
+        except OSError as exc:
+            log.error("pki_crl_rollback_restore_failed path=%s error=%s", path_str, exc)
+
+
+def _remove_stale_gds_crl_aliases(crl_dirs: list[Path], log: logging.Logger) -> list[str]:
+    """
+    Delete all GDS-controlled CRL aliases from *crl_dirs*.
+
+    Only stems in ``_GDS_CONTROLLED_CRL_STEMS`` are touched; files with
+    unknown names (e.g. client certs placed under trusted/certs) are never
+    deleted.  Returns a sorted list of deleted absolute paths.
+    """
+    deleted: list[str] = []
+    for d in crl_dirs:
+        for p in _gds_crl_candidates_in_dir(d):
+            try:
+                p.unlink()
+                log.info("pki_crl_alias_removed path=%s", p)
+                deleted.append(str(p))
+            except OSError as exc:
+                log.warning("pki_crl_alias_remove_failed path=%s error=%s", p, exc)
+    return deleted
+
+
+def _parse_crl_file(path: Path) -> x509.CertificateRevocationList:
+    """Parse a CRL from *path*; supports DER (.crl) and base64 (.crl.b64)."""
+    raw = path.read_bytes()
+    if path.name.lower().endswith(".crl.b64"):
+        try:
+            raw = base64.b64decode(raw.strip())
+        except Exception as exc:
+            raise ValueError(f"crl_b64_decode_failed:{exc}") from exc
+    try:
+        return x509.load_der_x509_crl(raw)
+    except Exception as exc:
+        raise ValueError(f"crl_parse_failed:{exc}") from exc
+
+
+def _validate_crl_dirs(crl_dirs: list[Path], strict_freshness: bool, log: logging.Logger) -> list[str]:
+    """
+    Scan all .crl and .crl.b64 files in *crl_dirs* and validate each.
+
+    Returns a list of problem strings; empty means all CRLs are valid.
+    With *strict_freshness* enabled, ``nextUpdate`` must be in the future.
+    """
+    problems: list[str] = []
+    now = datetime.now(timezone.utc)
+    for d in crl_dirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            lname = p.name.lower()
+            if not (lname.endswith(".crl") or lname.endswith(".crl.b64")):
+                continue
+            if not p.is_file():
+                continue
+            try:
+                crl = _parse_crl_file(p)
+            except ValueError as exc:
+                problems.append(f"unparseable:{p}:{exc}")
+                log.error("pki_crl_validation_unparseable path=%s error=%s", p, exc)
+                continue
+            # cryptography ≥42 exposes next_update_utc (timezone-aware);
+            # fall back to next_update (naïve UTC) for older releases.
+            nxt = getattr(crl, "next_update_utc", None) or crl.next_update
+            if nxt is None:
+                problems.append(f"missing_next_update:{p}")
+                log.error("pki_crl_validation_missing_next_update path=%s", p)
+                continue
+            if nxt.tzinfo is None:
+                nxt = nxt.replace(tzinfo=timezone.utc)
+            if strict_freshness and nxt <= now:
+                problems.append(f"crl_expired:{p}:next_update={nxt.isoformat()}")
+                log.error(
+                    "pki_crl_validation_expired path=%s next_update=%s now=%s",
+                    p, nxt.isoformat(), now.isoformat(),
+                )
+            else:
+                log.info("pki_crl_validation_ok path=%s next_update=%s", p, nxt.isoformat())
+    return problems
+
+
+def _write_target_stage_material(root: Path, target_cfg: dict[str, Any], artifact: dict[str, Any], log: logging.Logger | None = None) -> list[dict[str, Any]]:
+    _log = log or logging.getLogger(__name__)
     layout = _target_stage_layout(target_cfg)
     trusted_dir = root / layout["trusted_certs_dir"]
     trusted_crl_dir = root / layout["trusted_crl_dir"]
@@ -1518,6 +1652,35 @@ def _write_target_stage_material(root: Path, target_cfg: dict[str, Any], artifac
     compat_crl_dir = root / "ApplCerts/issuers/crl" if str(layout.get("trusted_certs_dir", "")).startswith("ApplCerts/") else None
     if compat_crl_dir:
         compat_crl_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect every CRL directory that will receive writes so we can
+    # snapshot, clean stale aliases, and post-validate atomically.
+    active_crl_dirs: list[Path] = [issuer_crl_dir, trusted_crl_dir]
+    if compat_crl_dir:
+        active_crl_dirs.append(compat_crl_dir)
+
+    has_incoming_crls = any(v for _, v in crl_items)
+    if has_incoming_crls:
+        _log.info(
+            "pki_trust_apply_started target=%s crl_dirs=%s",
+            target_cfg.get("target", ""),
+            [str(d) for d in active_crl_dirs],
+        )
+        # Snapshot before any mutation so we can roll back on failure.
+        _crl_snapshot = _snapshot_crl_dirs(active_crl_dirs)
+        # Remove all GDS-controlled CRL aliases (both .crl and .crl.b64)
+        # before writing the fresh set.  This prevents stale .crl.b64 files
+        # left over from previous code paths from co-existing with refreshed
+        # .crl files and causing the server's strict CRL freshness check to
+        # fail at boot.
+        _deleted = _remove_stale_gds_crl_aliases(active_crl_dirs, _log)
+        _log.info(
+            "pki_crl_cleanup_done target=%s deleted_count=%d deleted=%s",
+            target_cfg.get("target", ""),
+            len(_deleted),
+            _deleted,
+        )
+
     for alias, crl_base64 in crl_items:
         if not crl_base64:
             continue
@@ -1528,15 +1691,40 @@ def _write_target_stage_material(root: Path, target_cfg: dict[str, Any], artifac
             path = directory / f"{alias}.crl"
             if directory == compat_crl_dir:
                 if optional_atomic_write_bytes(path, crl_bytes):
+                    _log.info("pki_crl_written path=%s source=%s_crl_compat", path, alias)
                     written.append({"relative_path": str(path.relative_to(root)).replace("\\", "/"), "source": f"{alias}_crl_compat"})
             else:
                 atomic_write_bytes(path, crl_bytes)
+                _log.info("pki_crl_written path=%s source=%s_crl", path, alias)
                 written.append({"relative_path": str(path.relative_to(root)).replace("\\", "/"), "source": f"{alias}_crl"})
         if alias == "vault_intermediate":
             atomic_write_bytes(issuer_crl_dir / "current.crl", crl_bytes)
             atomic_write_bytes(trusted_crl_dir / "current.crl", crl_bytes)
+            _log.info("pki_crl_written path=%s source=crl", issuer_crl_dir / "current.crl")
+            _log.info("pki_crl_written path=%s source=crl", trusted_crl_dir / "current.crl")
             written.append({"relative_path": str((issuer_crl_dir / "current.crl").relative_to(root)).replace("\\", "/"), "source": "crl"})
             written.append({"relative_path": str((trusted_crl_dir / "current.crl").relative_to(root)).replace("\\", "/"), "source": "crl"})
+
+    if has_incoming_crls:
+        strict = env_bool("GDS_AGENT_STRICT_CRL_FRESHNESS", True)
+        _crl_problems = _validate_crl_dirs(active_crl_dirs, strict, _log)
+        if _crl_problems:
+            _log.error(
+                "pki_crl_validation_failed target=%s problems=%s — rolling back",
+                target_cfg.get("target", ""),
+                _crl_problems,
+            )
+            _restore_crl_snapshot(_crl_snapshot, _log)
+            raise RuntimeError(
+                f"gds_apply_trust_crl_validation_failed:"
+                f"target={target_cfg.get('target','')}:"
+                f"problems={_crl_problems}"
+            )
+        _log.info(
+            "pki_trust_apply_success target=%s crl_dirs=%s",
+            target_cfg.get("target", ""),
+            [str(d) for d in active_crl_dirs],
+        )
 
     certs = artifact.get("certificates", []) if isinstance(artifact.get("certificates"), list) else []
     for cert in certs:
@@ -1554,7 +1742,8 @@ def _write_target_stage_material(root: Path, target_cfg: dict[str, Any], artifac
     return written
 
 
-def _write_package_stage_material(root: Path, target_cfg: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, Any]]:
+def _write_package_stage_material(root: Path, target_cfg: dict[str, Any], manifest: dict[str, Any], log: logging.Logger | None = None) -> list[dict[str, Any]]:
+    _log = log or logging.getLogger(__name__)
     layout = _target_stage_layout(target_cfg)
     layout_kind = str(target_cfg.get("layout_kind", ""))
     install_plan = manifest.get("install_plan") if isinstance(manifest.get("install_plan"), dict) else {}
@@ -1633,12 +1822,51 @@ def _write_package_stage_material(root: Path, target_cfg: dict[str, Any], manife
             crl_rel = str(target_layout.get("issuer_crl") or "issuers/crl/current.crl.b64")
         crl_path = root / crl_rel
         crl_path.parent.mkdir(parents=True, exist_ok=True)
+
+        _pkg_crl_dirs: list[Path] = list({crl_path.parent, trusted_crl_dir})
+        _log.info(
+            "pki_trust_apply_started target=%s crl_dirs=%s",
+            target_cfg.get("target", ""),
+            [str(d) for d in _pkg_crl_dirs],
+        )
+        _pkg_snapshot = _snapshot_crl_dirs(_pkg_crl_dirs)
+        _pkg_deleted = _remove_stale_gds_crl_aliases(_pkg_crl_dirs, _log)
+        _log.info(
+            "pki_crl_cleanup_done target=%s deleted_count=%d deleted=%s",
+            target_cfg.get("target", ""),
+            len(_pkg_deleted),
+            _pkg_deleted,
+        )
+
         atomic_write_text(crl_path, crl_base64)
         atomic_write_bytes(crl_path.with_suffix(".crl"), crl_bytes)
         atomic_write_bytes(trusted_crl_dir / "current.crl", crl_bytes)
+        _log.info("pki_crl_written path=%s source=package_crl_base64", crl_path)
+        _log.info("pki_crl_written path=%s source=package_crl", crl_path.with_suffix(".crl"))
+        _log.info("pki_crl_written path=%s source=package_crl", trusted_crl_dir / "current.crl")
         written.append({"relative_path": str(crl_path.relative_to(root)).replace("\\", "/"), "source": "package_crl_base64"})
         written.append({"relative_path": str(crl_path.with_suffix(".crl").relative_to(root)).replace("\\", "/"), "source": "package_crl"})
         written.append({"relative_path": str((trusted_crl_dir / "current.crl").relative_to(root)).replace("\\", "/"), "source": "package_crl"})
+
+        strict = env_bool("GDS_AGENT_STRICT_CRL_FRESHNESS", True)
+        _pkg_problems = _validate_crl_dirs(_pkg_crl_dirs, strict, _log)
+        if _pkg_problems:
+            _log.error(
+                "pki_crl_validation_failed target=%s problems=%s — rolling back",
+                target_cfg.get("target", ""),
+                _pkg_problems,
+            )
+            _restore_crl_snapshot(_pkg_snapshot, _log)
+            raise RuntimeError(
+                f"gds_apply_trust_crl_validation_failed:"
+                f"target={target_cfg.get('target','')}:"
+                f"problems={_pkg_problems}"
+            )
+        _log.info(
+            "pki_trust_apply_success target=%s crl_dirs=%s",
+            target_cfg.get("target", ""),
+            [str(d) for d in _pkg_crl_dirs],
+        )
     return written
 
 
@@ -3000,7 +3228,7 @@ def _apply_component_trust_only(
     cert_path = _runtime_certificate_path(target, runtime_root)
     if cert_path.exists() and cert_path.is_file():
         before_cert_sha = _file_sha256(cert_path)
-    written = _write_target_stage_material(runtime_root, target_cfg, artifact)
+    written = _write_target_stage_material(runtime_root, target_cfg, artifact, log=log)
     after_cert_sha = ""
     if cert_path.exists() and cert_path.is_file():
         after_cert_sha = _file_sha256(cert_path)
@@ -3156,8 +3384,8 @@ def component_apply_trust_once(
     incoming_dir = stage_dir / "incoming-trust-store"
     shadow_dir.mkdir(parents=True, exist_ok=True)
     incoming_dir.mkdir(parents=True, exist_ok=True)
-    _write_package_stage_material(incoming_dir, target_cfg, manifest)
-    _write_package_stage_material(shadow_dir, target_cfg, manifest)
+    _write_package_stage_material(incoming_dir, target_cfg, manifest, log=log)
+    _write_package_stage_material(shadow_dir, target_cfg, manifest, log=log)
     stage_checksums = _collect_stage_checksums(shadow_dir)
     write_json_artifact(
         stage_dir / "checksums.json",

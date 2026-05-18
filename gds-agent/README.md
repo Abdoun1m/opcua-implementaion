@@ -874,3 +874,87 @@ GDS_AGENT_STRICT_CRL_FRESHNESS=true
 
 Trust-only apply never touches the component's own certificate, private key,
 package lifecycle, rollback material, or service restart behavior.
+
+## Known issue fixed: stale CRL artifacts
+
+**Symptom:** The OPC UA server fails to start with `crl_expired_or_missing_next_update`
+and `[PKI][EXPLICIT] Explicit trust material loading failed` even after a fresh CRL has
+been deployed by `gds-apply-trust`.
+
+**Root cause:** Earlier code paths in `_write_package_stage_material` (the package+certificate
+activation path) wrote both a DER file and a base64 alias:
+
+```text
+issuers/crl/current.crl      ← DER bytes
+issuers/crl/current.crl.b64  ← base64 text
+```
+
+When the trust-only path (`_write_target_stage_material`) took over, it refreshed the `.crl`
+files but left the stale `.crl.b64` aliases in place.  Because the OPC UA server scans **all**
+files ending in `.crl` or `.crl.b64` under its PKI directories with
+`OPCUA_GDS_STRICT_CRL_FRESHNESS=true`, a single expired `.crl.b64` alias is enough to abort
+the entire trust-loading phase.
+
+**Fix:** Before writing a fresh CRL set, `_write_target_stage_material` and
+`_write_package_stage_material` now:
+
+1. Snapshot all existing CRL files in every target directory (for rollback).
+2. Delete every GDS-controlled CRL alias — both `.crl` and `.crl.b64` variants — for
+   the stems `vault_intermediate`, `root_ca`, and `current` from:
+   - `ApplCerts/trusted/crl`
+   - `ApplCerts/issuers/crl`
+   - `ApplCerts/issuer/crl` (compat)
+3. Write the fresh CRL set atomically (temp-file + rename).
+4. Scan **all** `.crl` and `.crl.b64` files remaining under those directories and validate:
+   - File is parseable as a DER CRL (or valid base64-wrapped DER for `.crl.b64`).
+   - `nextUpdate` field is present.
+   - `nextUpdate` is in the future when `GDS_AGENT_STRICT_CRL_FRESHNESS=true`.
+5. If any file fails validation, restore from the snapshot (rollback) and raise an error
+   with `gds_apply_trust_crl_validation_failed`.
+6. Emit structured log events at each step:
+   - `pki_trust_apply_started`
+   - `pki_crl_alias_removed` (one per deleted file)
+   - `pki_crl_cleanup_done`
+   - `pki_crl_written` (one per written file)
+   - `pki_crl_validation_ok` or `pki_crl_validation_expired` (one per scanned file)
+   - `pki_crl_validation_failed` + `pki_crl_rollback_restored` on error
+   - `pki_trust_apply_success` on clean completion
+
+**Security invariants preserved:**
+
+- Only GDS-controlled stems (`vault_intermediate`, `root_ca`, `current`) are removed.
+  Files with unknown names are never deleted.
+- `trusted/certs/` is untouched — unknown local peer certificates such as `UaExpertClient`
+  are preserved.
+- Private key material is never touched.
+- Rollback restores the previous state if the new CRL set fails validation.
+
+**Verification after fix:**
+
+```bash
+# Apply trust:
+docker exec powergrid_opcua_server /app/build/powergrid_server \
+  --gds-apply-trust --target ot-server
+
+# All CRL files must show valid future nextUpdate:
+find /app/pki/ApplCerts -type f \( -name "*.crl" -o -name "*.crl.b64" \) \
+  -exec openssl crl -inform DER -in {} -noout -nextupdate \; 2>/dev/null
+
+# No expired or unparseable file must remain:
+find /app/pki/ApplCerts -type f \( -name "*.crl" -o -name "*.crl.b64" \) -print
+
+# Server must start cleanly:
+# Logs must include:
+#   [PKI][EXPLICIT] trustListSize=... issuerListSize=... revocationListSize=...
+#   [BOOT] ApplicationUri=urn:dataprotect:opcua:ot-server
+# Logs must NOT include:
+#   crl_expired_or_missing_next_update
+#   Explicit trust material loading failed
+```
+
+**Environment toggle:**
+
+```text
+GDS_AGENT_STRICT_CRL_FRESHNESS=true   # default — post-write validation enforces future nextUpdate
+GDS_AGENT_STRICT_CRL_FRESHNESS=false  # relaxed — parses and logs but does not fail on expiry
+```
